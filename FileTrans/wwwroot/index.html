@@ -1,0 +1,343 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>局域网文件传输</title>
+    <link href="lib/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="lib/css/bootstrap-icons.css">
+    <style>
+        body { background-color: #f8f9fa; }
+        .file-icon { font-size: 1.5rem; margin-right: 10px; }
+        .drop-zone { border: 2px dashed #ccc; border-radius: 10px; padding: 20px; text-align: center; background: white; transition: all 0.3s; }
+        .drop-zone.dragover { border-color: #0d6efd; background-color: #e9ecef; }
+        .cursor-pointer { cursor: pointer; }
+        .item-row:hover { background-color: #f1f1f1; }
+        .progress { height: 5px; }
+    </style>
+</head>
+<body>
+    <div id="app" class="container py-4">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <h5 class="mb-0"><i class="bi bi-hdd-network text-primary"></i> 局域网文件传输</h5>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-primary btn-sm" v-if="selectedItems.length > 0" @click="downloadSelected"><i class="bi bi-cloud-download"></i> 下载选中 ({{ selectedItems.length }})</button>
+                    <button class="btn btn-outline-primary btn-sm" @click="refresh"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+                    <div class="btn-group">
+                        <button class="btn btn-success btn-sm" @click="triggerUpload"><i class="bi bi-upload"></i> 上传文件</button>
+                        <button class="btn btn-success btn-sm dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false">
+                            <span class="visually-hidden">Toggle Dropdown</span>
+                        </button>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item" href="#" @click.prevent="triggerUploadFolder"><i class="bi bi-folder-plus"></i> 上传文件夹</a></li>
+                        </ul>
+                    </div>
+                    <input type="file" ref="fileInput" multiple style="display: none" @change="handleFileSelect">
+                    <input type="file" ref="folderInput" webkitdirectory style="display: none" @change="handleFileSelect">
+                    <button class="btn btn-outline-secondary btn-sm" @click="createFolder"><i class="bi bi-folder-plus"></i> 新建文件夹</button>
+                </div>
+            </div>
+            
+            <!-- Drop Zone -->
+            <div class="card-body" 
+                 @dragover.prevent="dragOver" 
+                 @dragleave.prevent="dragLeave" 
+                 @drop.prevent="handleDrop">
+                
+                <div class="drop-zone mb-3" :class="{ dragover: isDragOver }">
+                    <p class="mb-0 text-muted" v-if="!uploading">拖拽文件或文件夹到此处上传</p>
+                    <div v-else>
+                        <p class="mb-1">正在上传... {{ uploadProgress }}%</p>
+                        <div class="progress">
+                            <div class="progress-bar" role="progressbar" :style="{ width: uploadProgress + '%' }"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Breadcrumb -->
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb">
+                        <li class="breadcrumb-item cursor-pointer" @click="navigateTo('')"><i class="bi bi-house-door"></i> 根目录</li>
+                        <li class="breadcrumb-item cursor-pointer" v-for="(part, index) in pathParts" :key="index" @click="navigateToPart(index)">
+                            {{ part }}
+                        </li>
+                    </ol>
+                </nav>
+
+                <!-- File List -->
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle">
+                        <thead>
+                            <tr>
+                                <th style="width: 40px"><input type="checkbox" class="form-check-input" v-model="selectAll" @change="toggleSelectAll"></th>
+                                <th>名称</th>
+                                <th style="width: 150px">大小</th>
+                                <th style="width: 200px">修改时间</th>
+                                <th style="width: 150px">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-if="pathParts.length > 0" @click="goUp" class="cursor-pointer item-row">
+                                <td></td>
+                                <td colspan="4"><i class="bi bi-arrow-90deg-up file-icon text-secondary"></i> 返回上一级</td>
+                            </tr>
+                            <tr v-for="item in items" :key="item.name" class="item-row" :class="{'table-active': item.selected}" @click="toggleSelect(item)">
+                                <td @click.stop><input type="checkbox" class="form-check-input" v-model="item.selected"></td>
+                                <td @click.stop="handleItemClick(item)" class="cursor-pointer">
+                                    <i :class="getIconClass(item)" class="file-icon"></i>
+                                    {{ item.name }}
+                                </td>
+                                <td>{{ formatSize(item.size) }}</td>
+                                <td>{{ formatDate(item.lastModified) }}</td>
+                                <td>
+                                    <button class="btn btn-link btn-sm p-0 me-2" @click.stop="downloadItem(item)" title="下载"><i class="bi bi-download"></i></button>
+                                    <button class="btn btn-link btn-sm p-0 text-danger" @click.stop="deleteItem(item)" title="删除"><i class="bi bi-trash"></i></button>
+                                </td>
+                            </tr>
+                            <tr v-if="items.length === 0">
+                                <td colspan="5" class="text-center text-muted py-4">暂无文件</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="lib/js/bootstrap.bundle.min.js"></script>
+    <script src="lib/js/vue.global.prod.js"></script>
+    <script src="lib/js/axios.min.js"></script>
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    currentPath: '',
+                    items: [],
+                    isDragOver: false,
+                    uploading: false,
+                    uploadProgress: 0,
+                    selectAll: false
+                }
+            },
+            computed: {
+                pathParts() {
+                    return this.currentPath ? this.currentPath.split('/').filter(p => p) : [];
+                },
+                selectedItems() {
+                    return this.items.filter(i => i.selected);
+                }
+            },
+            mounted() {
+                this.loadItems();
+            },
+            methods: {
+                async loadItems() {
+                    try {
+                        const res = await axios.get(`/api/list?path=${encodeURIComponent(this.currentPath)}`);
+                        this.items = res.data.map(i => ({ ...i, selected: false }));
+                        this.selectAll = false;
+                    } catch (err) {
+                        alert('加载文件列表失败');
+                    }
+                },
+                refresh() { this.loadItems(); },
+                getIconClass(item) {
+                    if (item.isDirectory) return 'bi bi-folder-fill text-warning';
+                    const ext = item.name.split('.').pop().toLowerCase();
+                    if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) return 'bi bi-file-image text-primary';
+                    if (['pdf'].includes(ext)) return 'bi bi-file-pdf text-danger';
+                    if (['zip', 'rar', '7z'].includes(ext)) return 'bi bi-file-zip text-success';
+                    if (['mp4', 'avi', 'mov'].includes(ext)) return 'bi bi-file-play text-info';
+                    return 'bi bi-file-earmark text-secondary';
+                },
+                formatSize(size) {
+                    if (size === null) return '-';
+                    if (size < 1024) return size + ' B';
+                    if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB';
+                    if (size < 1024 * 1024 * 1024) return (size / 1024 / 1024).toFixed(1) + ' MB';
+                    return (size / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+                },
+                formatDate(dateStr) {
+                    return new Date(dateStr).toLocaleString();
+                },
+                handleItemClick(item) {
+                    if (item.isDirectory) {
+                        this.currentPath = this.currentPath ? `${this.currentPath}/${item.name}` : item.name;
+                        this.loadItems();
+                    } else {
+                        this.downloadItem(item);
+                    }
+                },
+                navigateTo(path) {
+                    this.currentPath = path;
+                    this.loadItems();
+                },
+                navigateToPart(index) {
+                    this.currentPath = this.pathParts.slice(0, index + 1).join('/');
+                    this.loadItems();
+                },
+                goUp() {
+                    const parts = this.pathParts;
+                    parts.pop();
+                    this.currentPath = parts.join('/');
+                    this.loadItems();
+                },
+                triggerUpload() {
+                    this.$refs.fileInput.click();
+                },
+                triggerUploadFolder() {
+                    this.$refs.folderInput.click();
+                },
+                handleFileSelect(event) {
+                    const files = event.target.files;
+                    const fileObjects = [];
+                    for (let i = 0; i < files.length; i++) {
+                        const file = files[i];
+                        const path = file.webkitRelativePath || file.name;
+                        fileObjects.push({ file, path });
+                    }
+                    this.uploadFiles(fileObjects);
+                    event.target.value = ''; // reset
+                },
+                dragOver(e) { this.isDragOver = true; },
+                dragLeave(e) { this.isDragOver = false; },
+                async handleDrop(e) {
+                    this.isDragOver = false;
+                    const items = e.dataTransfer.items;
+                    if (items) {
+                        const fileList = [];
+                        const queue = [];
+                        for (let i = 0; i < items.length; i++) {
+                            const item = items[i];
+                            const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : (item.getAsEntry ? item.getAsEntry() : null);
+                            if (entry) {
+                                queue.push(this.traverseFileTree(entry));
+                            }
+                        }
+                        
+                        if (queue.length > 0) {
+                            const results = await Promise.all(queue);
+                            results.forEach(files => fileList.push(...files));
+                            this.uploadFiles(fileList);
+                        } else {
+                             // Fallback if getAsEntry not supported but items exist
+                            const files = e.dataTransfer.files;
+                            if (files.length > 0) {
+                                const fileList = Array.from(files).map(f => ({ file: f, path: f.name }));
+                                this.uploadFiles(fileList);
+                            }
+                        }
+                    } else {
+                        const files = e.dataTransfer.files;
+                        if (files.length > 0) {
+                            const fileList = Array.from(files).map(f => ({ file: f, path: f.name }));
+                            this.uploadFiles(fileList);
+                        }
+                    }
+                },
+                traverseFileTree(item, path = '') {
+                    return new Promise((resolve) => {
+                        if (item.isFile) {
+                            item.file(file => {
+                                resolve([{ file, path: path + file.name }]);
+                            });
+                        } else if (item.isDirectory) {
+                            const dirReader = item.createReader();
+                            const entries = [];
+                            const readEntries = () => {
+                                dirReader.readEntries(async (result) => {
+                                    if (result.length === 0) {
+                                        const promises = entries.map(entry => this.traverseFileTree(entry, path + item.name + "/"));
+                                        const results = await Promise.all(promises);
+                                        resolve(results.flat());
+                                    } else {
+                                        entries.push(...result);
+                                        readEntries();
+                                    }
+                                });
+                            };
+                            readEntries();
+                        }
+                    });
+                },
+                async uploadFiles(fileObjects) {
+                    if (fileObjects.length === 0) return;
+                    this.uploading = true;
+                    this.uploadProgress = 0;
+
+                    const formData = new FormData();
+                    for (let i = 0; i < fileObjects.length; i++) {
+                        const { file, path } = fileObjects[i];
+                        formData.append('files', file, path);
+                    }
+                    formData.append('path', this.currentPath);
+
+                    try {
+                        await axios.post('/api/upload', formData, {
+                            headers: { 'Content-Type': 'multipart/form-data' },
+                            onUploadProgress: (progressEvent) => {
+                                const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                                this.uploadProgress = percentCompleted;
+                            }
+                        });
+                        this.loadItems();
+                    } catch (err) {
+                        alert('上传失败: ' + err.message);
+                    } finally {
+                        this.uploading = false;
+                    }
+                },
+                downloadItem(item) {
+                    const path = this.currentPath ? `${this.currentPath}/${item.name}` : item.name;
+                    window.location.href = `/api/download?path=${encodeURIComponent(path)}`;
+                },
+                async downloadSelected() {
+                    const paths = this.selectedItems.map(item => this.currentPath ? `${this.currentPath}/${item.name}` : item.name);
+                    try {
+                        const response = await axios.post('/api/download-zip', { paths }, { responseType: 'blob' });
+                        const url = window.URL.createObjectURL(new Blob([response.data]));
+                        const link = document.createElement('a');
+                        link.href = url;
+                        link.setAttribute('download', 'batch_download.zip');
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                    } catch (err) {
+                        alert('下载失败');
+                    }
+                },
+                async deleteItem(item) {
+                    if (!confirm(`确定要删除 ${item.name} 吗？`)) return;
+                    const path = this.currentPath ? `${this.currentPath}/${item.name}` : item.name;
+                    try {
+                        await axios.delete(`/api/delete?path=${encodeURIComponent(path)}`);
+                        this.loadItems();
+                    } catch (err) {
+                        alert('删除失败');
+                    }
+                },
+                async createFolder() {
+                    const name = prompt('请输入文件夹名称:');
+                    if (!name) return;
+                    try {
+                        await axios.post('/api/create-folder', { path: this.currentPath, name });
+                        this.loadItems();
+                    } catch (err) {
+                        alert('创建文件夹失败');
+                    }
+                },
+                toggleSelectAll() {
+                    this.items.forEach(i => i.selected = this.selectAll);
+                },
+                toggleSelect(item) {
+                    item.selected = !item.selected;
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
+

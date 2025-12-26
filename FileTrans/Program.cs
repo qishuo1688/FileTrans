@@ -20,9 +20,9 @@ builder.Services.Configure<FormOptions>(options =>
 });
 
 // Configure Kestrel for LAN access and large files
-builder.WebHost.ConfigureKestrel(serverOptions =>
+builder.WebHost.UseUrls("http://0.0.0.0:9000").ConfigureKestrel(serverOptions =>
 {
-    serverOptions.ListenAnyIP(9000);
+    //serverOptions.ListenAnyIP(9000);
     serverOptions.Limits.MaxRequestBodySize = null; // Unlimited upload size
 });
 
